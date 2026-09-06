@@ -3,52 +3,48 @@ package lyriarest
 import (
 	"fmt"
 	"math"
+	"strings"
 
 	"github.com/shouni/genai-kit/gemini"
 )
 
-// wavGenerationConfig は、generationConfig に混ぜて WAV を要求する指定です。
+// wavMIMEType は、音声を WAV で要求する値です。
 //
-// このライブラリの存在理由はこの 1 か所です。genai SDK の GenerateContentConfig には
-// 対応するフィールドが無いため、REST を直接叩いています。呼び出し側が渡した
-// generationConfig より後に上書きで載せるので、GenerateOptions からこれを打ち消す
-// ことはできません（WAV 前提のライブラリなので、選択肢を持たせていません）。
+// このライブラリの存在理由はこの 1 か所です。genai SDK には出力フォーマットを指定する口が
+// 無いため、REST を直接叩いています。値は API が受け付ける列挙のひとつで、他に
+// audio/mp3・audio/ogg_opus・audio/l16・audio/alaw・audio/mulaw があります。
 //
-// TODO: REST 側のフィールド名を実機で確認して固定する。ここ以外にフォーマット指定は無い。
-var wavGenerationConfig = map[string]any{
-	"responseMimeType": "audio/wav",
-}
+// ただし 2026-09-07 時点で、Lyria のどのモデルもこの指定を受け付けません（README の
+// 「凍結の理由」を参照）。API のバリデーションは値を通し、その先のモデルが弾きます。
+// 対応した日には、このライブラリは何も変えずに動きます。
+const wavMIMEType = "audio/wav"
 
-// requestBody は generateContent のリクエスト本文です。
+// requestBody は interactions のリクエスト本文です。
+//
+// モデル名は URL ではなく本文に載ります（generateContent とはそこが違います）。
 type requestBody struct {
-	Contents          []content       `json:"contents"`
-	SystemInstruction *content        `json:"systemInstruction,omitempty"`
-	GenerationConfig  map[string]any  `json:"generationConfig,omitempty"`
-	SafetySettings    []safetySetting `json:"safetySettings,omitempty"`
+	Model             string            `json:"model"`
+	Input             any               `json:"input"`
+	ResponseFormat    responseFormat    `json:"response_format"`
+	GenerationConfig  *generationConfig `json:"generation_config,omitempty"`
+	SafetySettings    []safetySetting   `json:"safety_settings,omitempty"`
+	SystemInstruction string            `json:"system_instruction,omitempty"`
 }
 
-type content struct {
-	Role  string `json:"role,omitempty"`
-	Parts []part `json:"parts"`
+// responseFormat は出力形式の指定です。
+type responseFormat struct {
+	Type     string `json:"type"`
+	MIMEType string `json:"mime_type,omitempty"`
 }
 
-// part はリクエストとレスポンスで共用します。Thought はレスポンスにだけ現れます。
-type part struct {
-	Text       string    `json:"text,omitempty"`
-	Thought    bool      `json:"thought,omitempty"`
-	InlineData *blob     `json:"inlineData,omitempty"`
-	FileData   *fileData `json:"fileData,omitempty"`
-}
-
-// blob はインライン添付です。Data は encoding/json が base64 で往復させます。
-type blob struct {
-	MIMEType string `json:"mimeType"`
-	Data     []byte `json:"data"`
-}
-
-type fileData struct {
-	MIMEType string `json:"mimeType,omitempty"`
-	FileURI  string `json:"fileUri"`
+// generationConfig は interactions が受け付ける生成パラメータです。
+//
+// generateContent の GenerationConfig とは別物で、温度や TopP はありません。
+// GenerateOptions のうちここに写せるものだけを渡します。
+type generationConfig struct {
+	Seed            *int32   `json:"seed,omitempty"`
+	MaxOutputTokens int32    `json:"max_output_tokens,omitempty"`
+	StopSequences   []string `json:"stop_sequences,omitempty"`
 }
 
 type safetySetting struct {
@@ -56,27 +52,36 @@ type safetySetting struct {
 	Threshold string `json:"threshold"`
 }
 
+// contentBlock は入力・出力に共通する内容ブロックです。
+//
+// type で種類を分ける形なので、テキストと画像で別の構造体にはしません。
+// 出力側では mime_type と data が埋まって返ります。
+type contentBlock struct {
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	MIMEType string `json:"mime_type,omitempty"`
+	Data     []byte `json:"data,omitempty"`
+	URI      string `json:"uri,omitempty"`
+}
+
 // buildRequestBody は、genai-kit の Generate と同じ入力からリクエスト本文を組み立てます。
-func buildRequestBody(prompt string, attachments []gemini.Attachment, opts gemini.GenerateOptions) (requestBody, error) {
-	parts, err := attachmentParts(prompt, attachments)
+func buildRequestBody(model, prompt string, attachments []gemini.Attachment, opts gemini.GenerateOptions) (requestBody, error) {
+	input, err := buildInput(prompt, attachments)
 	if err != nil {
 		return requestBody{}, err
 	}
 
-	config, err := generationConfig(opts)
+	config, err := buildGenerationConfig(opts)
 	if err != nil {
 		return requestBody{}, err
-	}
-	for key, value := range wavGenerationConfig {
-		config[key] = value
 	}
 
 	body := requestBody{
-		Contents:         []content{{Role: "user", Parts: parts}},
-		GenerationConfig: config,
-	}
-	if opts.SystemPrompt != "" {
-		body.SystemInstruction = &content{Parts: []part{{Text: opts.SystemPrompt}}}
+		Model:             model,
+		Input:             input,
+		ResponseFormat:    responseFormat{Type: "audio", MIMEType: wavMIMEType},
+		GenerationConfig:  config,
+		SystemInstruction: opts.SystemPrompt,
 	}
 	for _, setting := range opts.SafetySettings {
 		if setting == nil {
@@ -91,69 +96,68 @@ func buildRequestBody(prompt string, attachments []gemini.Attachment, opts gemin
 	return body, nil
 }
 
-// attachmentParts は、プロンプトと添付をパート列へ変換します。
+// buildInput は input フィールドの値を作ります。
 //
-// 規則は genai-kit の attachmentParts と同じです。送るものが無い添付は読み飛ばし、
-// Data と URI の併用と、Data に MIME type が無いものは弾きます。URI 参照の MIME type は
-// 省略でき、その場合はサーバー側の判定に委ねます。
-func attachmentParts(prompt string, attachments []gemini.Attachment) ([]part, error) {
-	parts := make([]part, 0, len(attachments)+1)
+// 添付が無ければプロンプトの文字列をそのまま渡します。API は文字列とブロックの配列の
+// 両方を受け付けるので、単純な生成では JSON も読みやすい形になります。
+func buildInput(prompt string, attachments []gemini.Attachment) (any, error) {
+	blocks := make([]contentBlock, 0, len(attachments)+1)
 	if prompt != "" {
-		parts = append(parts, part{Text: prompt})
+		blocks = append(blocks, contentBlock{Type: "text", Text: prompt})
 	}
 
 	for i, attachment := range attachments {
+		// 送るものが無い添付は落とします。画像を「あれば渡す」形で組み立てる呼び出し側が、
+		// 空要素の除去を毎回書かずに済むようにするためです（genai-kit と同じ規則）。
 		if attachment.IsEmpty() {
 			continue
 		}
 		if len(attachment.Data) > 0 && attachment.URI != "" {
 			return nil, fmt.Errorf("%w: attachments[%d] は Data と URI のどちらか一方だけを設定してください", ErrInvalidAttachment, i)
 		}
-		if attachment.URI != "" {
-			parts = append(parts, part{FileData: &fileData{FileURI: attachment.URI, MIMEType: attachment.MIMEType}})
-			continue
+		if !strings.HasPrefix(attachment.MIMEType, "image/") {
+			return nil, fmt.Errorf("%w: attachments[%d] の MIME type は %q", ErrUnsupportedAttachment, i, attachment.MIMEType)
 		}
-		if attachment.MIMEType == "" {
+		if len(attachment.Data) > 0 && attachment.MIMEType == "" {
 			return nil, fmt.Errorf("%w: attachments[%d] にMIME typeが設定されていません", ErrInvalidAttachment, i)
 		}
-		parts = append(parts, part{InlineData: &blob{MIMEType: attachment.MIMEType, Data: attachment.Data}})
+		blocks = append(blocks, contentBlock{
+			Type:     "image",
+			MIMEType: attachment.MIMEType,
+			Data:     attachment.Data,
+			URI:      attachment.URI,
+		})
 	}
 
-	if len(parts) == 0 {
-		return nil, ErrEmptyParts
+	switch len(blocks) {
+	case 0:
+		return nil, ErrEmptyInput
+	case 1:
+		if blocks[0].Type == "text" {
+			return blocks[0].Text, nil
+		}
 	}
-	return parts, nil
+	return blocks, nil
 }
 
-// generationConfig は GenerateOptions のうち generateContent が受け付ける項目を写します。
+// buildGenerationConfig は GenerateOptions のうち interactions が受け付ける項目を写します。
 //
-// 音声生成で意味を持つのは Seed だけですが、テキスト向けの項目も落とさずに渡します。
-// genai-kit の Generator と同じ入力を受ける以上、渡された値を黙って捨てないためです。
-func generationConfig(opts gemini.GenerateOptions) (map[string]any, error) {
-	config := map[string]any{}
+// 温度・TopP・TopK・ResponseMIMEType は interactions の generation_config に無いので
+// 落ちます。音声生成で意味を持つのは Seed で、genai-kit の lyria が再現性のために渡してきます。
+func buildGenerationConfig(opts gemini.GenerateOptions) (*generationConfig, error) {
+	config := &generationConfig{
+		MaxOutputTokens: opts.MaxOutputTokens,
+		StopSequences:   opts.StopSequences,
+	}
 	if opts.Seed != nil {
 		if *opts.Seed < math.MinInt32 || *opts.Seed > math.MaxInt32 {
 			return nil, fmt.Errorf("%w: %d", ErrInvalidSeed, *opts.Seed)
 		}
-		config["seed"] = int32(*opts.Seed)
+		seed := int32(*opts.Seed)
+		config.Seed = &seed
 	}
-	if opts.Temperature != nil {
-		config["temperature"] = *opts.Temperature
-	}
-	if opts.TopP != nil {
-		config["topP"] = *opts.TopP
-	}
-	if opts.TopK != nil {
-		config["topK"] = *opts.TopK
-	}
-	if opts.MaxOutputTokens > 0 {
-		config["maxOutputTokens"] = opts.MaxOutputTokens
-	}
-	if len(opts.StopSequences) > 0 {
-		config["stopSequences"] = opts.StopSequences
-	}
-	if opts.ResponseMIMEType != "" {
-		config["responseMimeType"] = opts.ResponseMIMEType
+	if config.Seed == nil && config.MaxOutputTokens == 0 && len(config.StopSequences) == 0 {
+		return nil, nil
 	}
 	return config, nil
 }

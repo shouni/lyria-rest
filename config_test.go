@@ -8,89 +8,40 @@ import (
 func TestConfigValidate(t *testing.T) {
 	t.Parallel()
 
-	tests := []struct {
-		name string
-		cfg  Config
-		want error
-	}{
-		{"正常系: Vertex AI", Config{ProjectID: "p", LocationID: "asia-northeast1"}, nil},
-		{"正常系: Gemini API", Config{APIKey: "key"}, nil},
-		{"異常系: どちらも空", Config{}, ErrConfigRequired},
-		{"異常系: ProjectID のみ", Config{ProjectID: "p"}, ErrIncompleteVertexConfig},
-		{"異常系: LocationID のみ", Config{LocationID: "l"}, ErrIncompleteVertexConfig},
-		// どちらを使うか決められないため、黙って一方を選ばずに落とす。
-		{"異常系: 併用", Config{ProjectID: "p", LocationID: "l", APIKey: "key"}, ErrExclusiveConfig},
-		// 書きかけの Vertex 設定より、併用そのものを先に知らせる。
-		{"異常系: 併用 + 書きかけ", Config{ProjectID: "p", APIKey: "key"}, ErrExclusiveConfig},
+	if err := (Config{}).validate(); !errors.Is(err, ErrAPIKeyRequired) {
+		t.Errorf("validate() error = %v, want %v", err, ErrAPIKeyRequired)
 	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
-			err := tt.cfg.validate()
-			if tt.want == nil {
-				if err != nil {
-					t.Fatalf("validate() error = %v, want nil", err)
-				}
-				return
-			}
-			if !errors.Is(err, tt.want) {
-				t.Errorf("validate() error = %v, want %v", err, tt.want)
-			}
-		})
+	if err := (Config{APIKey: "key"}).validate(); err != nil {
+		t.Errorf("validate() error = %v, want nil", err)
 	}
 }
 
-// TestGenerateContentURL は、バックエンドごとの URL の形を検証します。
-// Vertex AI の "global" だけはホストにリージョン接頭辞が付きません。
-func TestGenerateContentURL(t *testing.T) {
+// TestInteractionsURL は、モデル名が URL に入らないことを検証します。
+// generateContent とは違い、interactions はモデルをリクエスト本文で指定します。
+func TestInteractionsURL(t *testing.T) {
 	t.Parallel()
 
 	tests := []struct {
-		name  string
-		cfg   Config
-		model string
-		want  string
+		name string
+		cfg  Config
+		want string
 	}{
-		{
-			name:  "Gemini API",
-			cfg:   Config{APIKey: "key"},
-			model: "lyria-3.5",
-			want:  "https://generativelanguage.googleapis.com/v1beta/models/lyria-3.5:generateContent",
-		},
-		{
-			name:  "Vertex AI（リージョン）",
-			cfg:   Config{ProjectID: "proj", LocationID: "us-central1"},
-			model: "lyria-3.5",
-			want:  "https://us-central1-aiplatform.googleapis.com/v1/projects/proj/locations/us-central1/publishers/google/models/lyria-3.5:generateContent",
-		},
-		{
-			name:  "Vertex AI（global はホストに接頭辞なし）",
-			cfg:   Config{ProjectID: "proj", LocationID: "global"},
-			model: "lyria-3.5",
-			want:  "https://aiplatform.googleapis.com/v1/projects/proj/locations/global/publishers/google/models/lyria-3.5:generateContent",
-		},
-		{
-			name:  "Endpoint 上書き（末尾スラッシュは落とす）",
-			cfg:   Config{APIKey: "key", Endpoint: "http://127.0.0.1:8080/"},
-			model: "lyria-3.5",
-			want:  "http://127.0.0.1:8080/v1beta/models/lyria-3.5:generateContent",
-		},
+		{"既定", Config{APIKey: "k"}, "https://generativelanguage.googleapis.com/v1beta/interactions"},
+		{"Endpoint 上書き（末尾スラッシュは落とす）", Config{APIKey: "k", Endpoint: "http://127.0.0.1:8080/"}, "http://127.0.0.1:8080/v1beta/interactions"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			if got := tt.cfg.generateContentURL(tt.model); got != tt.want {
-				t.Errorf("generateContentURL() = %q, want %q", got, tt.want)
+			if got := tt.cfg.interactionsURL(); got != tt.want {
+				t.Errorf("interactionsURL() = %q, want %q", got, tt.want)
 			}
 		})
 	}
 }
 
-// TestNormalizeModel は、SDK が受け付ける 2 通りの表記が同じ URL になることを検証します。
+// TestNormalizeModel は、SDK が受け付ける 2 通りの表記が同じ値になることを検証します。
 func TestNormalizeModel(t *testing.T) {
 	t.Parallel()
 
@@ -98,8 +49,5 @@ func TestNormalizeModel(t *testing.T) {
 		if got := normalizeModel(in); got != "lyria-3.5" {
 			t.Errorf("normalizeModel(%q) = %q", in, got)
 		}
-	}
-	if got := normalizeModel(""); got != "" {
-		t.Errorf("normalizeModel(\"\") = %q, want empty", got)
 	}
 }

@@ -1,6 +1,7 @@
 package lyriarest
 
 import (
+	"encoding/json"
 	"errors"
 	"math"
 	"testing"
@@ -8,93 +9,102 @@ import (
 	"github.com/shouni/genai-kit/gemini"
 )
 
-// TestBuildRequestBodyMapsPromptAndAttachments は、プロンプトと添付がパートへ写ることを
-// 検証します。genai-kit の attachmentParts と同じ規則で、空の添付は読み飛ばします。
-func TestBuildRequestBodyMapsPromptAndAttachments(t *testing.T) {
-	t.Parallel()
-
-	body, err := buildRequestBody("sing this", []gemini.Attachment{
-		{},
-		{MIMEType: "image/png", Data: []byte("cover")},
-		{URI: "gs://bucket/ref.png"},
-	}, gemini.GenerateOptions{})
-	if err != nil {
-		t.Fatalf("buildRequestBody() error = %v", err)
-	}
-
-	if len(body.Contents) != 1 || body.Contents[0].Role != "user" {
-		t.Fatalf("Contents = %+v, want user ロールの 1 件", body.Contents)
-	}
-	parts := body.Contents[0].Parts
-	if len(parts) != 3 {
-		t.Fatalf("Parts = %d, want 3（空の添付は落ちる）", len(parts))
-	}
-	if parts[0].Text != "sing this" {
-		t.Errorf("parts[0].Text = %q", parts[0].Text)
-	}
-	if parts[1].InlineData == nil || parts[1].InlineData.MIMEType != "image/png" || string(parts[1].InlineData.Data) != "cover" {
-		t.Errorf("parts[1] = %+v, want インライン画像", parts[1])
-	}
-	if parts[2].FileData == nil || parts[2].FileData.FileURI != "gs://bucket/ref.png" {
-		t.Errorf("parts[2] = %+v, want gs:// の fileData", parts[2])
-	}
-}
-
-// TestBuildRequestBodyAlwaysRequestsWAV は、WAV 指定が必ず generationConfig に載ること、
-// 呼び出し側の指定より後に上書きされることを検証します。フィールド名には依存しません。
+// TestBuildRequestBodyAlwaysRequestsWAV は、WAV の指定が必ず載ることを検証します。
+// これを送らないと SDK 経由と同じ MP3 になり、このライブラリの存在理由が消えます。
 func TestBuildRequestBodyAlwaysRequestsWAV(t *testing.T) {
 	t.Parallel()
 
-	if len(wavGenerationConfig) == 0 {
-		t.Fatal("wavGenerationConfig が空です。WAV 前提のライブラリなので、指定は必ず要ります")
-	}
-
-	opts := gemini.GenerateOptions{}
-	for key := range wavGenerationConfig {
-		if key == "responseMimeType" {
-			opts.ResponseMIMEType = "application/json"
-		}
-	}
-	body, err := buildRequestBody("p", nil, opts)
+	body, err := buildRequestBody("lyria-3.5", "p", nil, gemini.GenerateOptions{})
 	if err != nil {
 		t.Fatalf("buildRequestBody() error = %v", err)
 	}
 
-	for key, want := range wavGenerationConfig {
-		if got := body.GenerationConfig[key]; got != want {
-			t.Errorf("generationConfig[%q] = %v, want %v（呼び出し側の指定より WAV が勝つこと）", key, got, want)
-		}
+	if body.ResponseFormat.Type != "audio" || body.ResponseFormat.MIMEType != wavMIMEType {
+		t.Errorf("ResponseFormat = %+v, want type=audio mime_type=%s", body.ResponseFormat, wavMIMEType)
+	}
+	if body.Model != "lyria-3.5" {
+		t.Errorf("Model = %q（モデルは URL ではなく本文に載る）", body.Model)
 	}
 }
 
-// TestBuildRequestBodyKeepsGenerationOptions は、Seed と安全設定が落ちないことを検証します。
-// genai-kit の lyria は音声生成に Seed と BLOCK_NONE の安全設定を渡してきます。
-func TestBuildRequestBodyKeepsGenerationOptions(t *testing.T) {
+// TestBuildInputUsesPlainStringWithoutAttachments は、添付が無ければ input が
+// 文字列になることを検証します。API は文字列とブロック配列の両方を受け付けます。
+func TestBuildInputUsesPlainStringWithoutAttachments(t *testing.T) {
+	t.Parallel()
+
+	got, err := buildInput("sing this", nil)
+	if err != nil {
+		t.Fatalf("buildInput() error = %v", err)
+	}
+	if s, ok := got.(string); !ok || s != "sing this" {
+		t.Errorf("input = %#v, want 文字列", got)
+	}
+}
+
+// TestBuildInputBuildsBlocksWithAttachments は、添付があるとブロック配列になり、
+// 空の添付が黙って落ちることを検証します（genai-kit と同じ規則）。
+func TestBuildInputBuildsBlocksWithAttachments(t *testing.T) {
+	t.Parallel()
+
+	got, err := buildInput("sing this", []gemini.Attachment{
+		{},
+		{MIMEType: "image/png", Data: []byte("cover")},
+	})
+	if err != nil {
+		t.Fatalf("buildInput() error = %v", err)
+	}
+
+	blocks, ok := got.([]contentBlock)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("input = %#v, want 2 ブロック（空の添付は落ちる）", got)
+	}
+	if blocks[0].Type != "text" || blocks[0].Text != "sing this" {
+		t.Errorf("blocks[0] = %+v", blocks[0])
+	}
+	if blocks[1].Type != "image" || blocks[1].MIMEType != "image/png" || string(blocks[1].Data) != "cover" {
+		t.Errorf("blocks[1] = %+v", blocks[1])
+	}
+
+	// data は base64 の文字列として送られること（[]byte の既定の符号化）。
+	raw, err := json.Marshal(blocks[1])
+	if err != nil {
+		t.Fatalf("Marshal() error = %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(raw, &decoded); err != nil {
+		t.Fatalf("Unmarshal() error = %v", err)
+	}
+	if decoded["data"] != "Y292ZXI=" {
+		t.Errorf("data = %v, want base64 文字列", decoded["data"])
+	}
+}
+
+// TestBuildGenerationConfigKeepsSeed は、シードが落ちないことを検証します。
+// genai-kit の lyria は再現性のためにシードを渡してきます。
+func TestBuildGenerationConfigKeepsSeed(t *testing.T) {
 	t.Parallel()
 
 	seed := int64(42)
-	body, err := buildRequestBody("p", nil, gemini.GenerateOptions{
-		Seed:           &seed,
-		SystemPrompt:   "be quiet",
-		SafetySettings: gemini.NewSafetySettings(gemini.SafetyBlockNone),
-	})
+	got, err := buildGenerationConfig(gemini.GenerateOptions{Seed: &seed})
 	if err != nil {
-		t.Fatalf("buildRequestBody() error = %v", err)
+		t.Fatalf("buildGenerationConfig() error = %v", err)
 	}
+	if got == nil || got.Seed == nil || *got.Seed != 42 {
+		t.Errorf("generation_config = %+v, want seed=42", got)
+	}
+}
 
-	if got := body.GenerationConfig["seed"]; got != int32(42) {
-		t.Errorf("seed = %v (%T), want int32(42)", got, got)
+// TestBuildGenerationConfigOmittedWhenEmpty は、渡すものが無ければ
+// generation_config そのものを送らないことを検証します。
+func TestBuildGenerationConfigOmittedWhenEmpty(t *testing.T) {
+	t.Parallel()
+
+	got, err := buildGenerationConfig(gemini.GenerateOptions{Temperature: new(float32(0.5))})
+	if err != nil {
+		t.Fatalf("buildGenerationConfig() error = %v", err)
 	}
-	if body.SystemInstruction == nil || body.SystemInstruction.Parts[0].Text != "be quiet" {
-		t.Errorf("SystemInstruction = %+v", body.SystemInstruction)
-	}
-	if len(body.SafetySettings) == 0 {
-		t.Fatal("SafetySettings が落ちています")
-	}
-	for _, s := range body.SafetySettings {
-		if s.Category == "" || s.Threshold != string(gemini.SafetyBlockNone) {
-			t.Errorf("SafetySettings = %+v, want BLOCK_NONE", s)
-		}
+	if got != nil {
+		t.Errorf("generation_config = %+v, want nil（interactions に温度は無い）", got)
 	}
 }
 
@@ -108,9 +118,9 @@ func TestBuildRequestBodyRejectsInvalidInput(t *testing.T) {
 		opts        gemini.GenerateOptions
 		want        error
 	}{
-		{"送るものが無い", "", []gemini.Attachment{{}}, gemini.GenerateOptions{}, ErrEmptyParts},
-		{"Data と URI の併用", "p", []gemini.Attachment{{Data: []byte("x"), URI: "gs://b/a", MIMEType: "image/png"}}, gemini.GenerateOptions{}, ErrInvalidAttachment},
-		{"Data に MIME type が無い", "p", []gemini.Attachment{{Data: []byte("x")}}, gemini.GenerateOptions{}, ErrInvalidAttachment},
+		{"送るものが無い", "", []gemini.Attachment{{}}, gemini.GenerateOptions{}, ErrEmptyInput},
+		{"Data と URI の併用", "p", []gemini.Attachment{{Data: []byte("x"), URI: "https://e/a.png", MIMEType: "image/png"}}, gemini.GenerateOptions{}, ErrInvalidAttachment},
+		{"画像以外の添付", "p", []gemini.Attachment{{Data: []byte("x"), MIMEType: "audio/mpeg"}}, gemini.GenerateOptions{}, ErrUnsupportedAttachment},
 		{"Seed が int32 を超える", "p", nil, gemini.GenerateOptions{Seed: new(int64(math.MaxInt32 + 1))}, ErrInvalidSeed},
 	}
 
@@ -118,7 +128,7 @@ func TestBuildRequestBodyRejectsInvalidInput(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 
-			_, err := buildRequestBody(tt.prompt, tt.attachments, tt.opts)
+			_, err := buildRequestBody("lyria-3.5", tt.prompt, tt.attachments, tt.opts)
 			if !errors.Is(err, tt.want) {
 				t.Errorf("error = %v, want %v", err, tt.want)
 			}

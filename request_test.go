@@ -120,7 +120,9 @@ func TestBuildRequestBodyRejectsInvalidInput(t *testing.T) {
 	}{
 		{"送るものが無い", "", []gemini.Attachment{{}}, gemini.GenerateOptions{}, ErrEmptyInput},
 		{"Data と URI の併用", "p", []gemini.Attachment{{Data: []byte("x"), URI: "https://e/a.png", MIMEType: "image/png"}}, gemini.GenerateOptions{}, ErrInvalidAttachment},
+		{"Data に MIME type が無い", "p", []gemini.Attachment{{Data: []byte("x")}}, gemini.GenerateOptions{}, ErrInvalidAttachment},
 		{"画像以外の添付", "p", []gemini.Attachment{{Data: []byte("x"), MIMEType: "audio/mpeg"}}, gemini.GenerateOptions{}, ErrUnsupportedAttachment},
+		{"画像以外の URI 添付", "p", []gemini.Attachment{{URI: "https://e/a.mp3", MIMEType: "audio/mpeg"}}, gemini.GenerateOptions{}, ErrUnsupportedAttachment},
 		{"Seed が int32 を超える", "p", nil, gemini.GenerateOptions{Seed: new(int64(math.MaxInt32 + 1))}, ErrInvalidSeed},
 	}
 
@@ -133,5 +135,60 @@ func TestBuildRequestBodyRejectsInvalidInput(t *testing.T) {
 				t.Errorf("error = %v, want %v", err, tt.want)
 			}
 		})
+	}
+}
+
+// TestBuildInputAcceptsURIWithoutMIMEType は、URI 参照の添付では MIME type を省略できる
+// ことを検証します。genai-kit の Attachment は URI 参照で MIME type を任意としており、
+// API 側でも mime_type は必須ではありません。
+func TestBuildInputAcceptsURIWithoutMIMEType(t *testing.T) {
+	t.Parallel()
+
+	got, err := buildInput("p", []gemini.Attachment{{URI: "https://e/a.png"}})
+	if err != nil {
+		t.Fatalf("buildInput() error = %v", err)
+	}
+
+	blocks, ok := got.([]contentBlock)
+	if !ok || len(blocks) != 2 {
+		t.Fatalf("input = %#v, want 2 ブロック", got)
+	}
+	if blocks[1].Type != "image" || blocks[1].URI != "https://e/a.png" || blocks[1].MIMEType != "" {
+		t.Errorf("blocks[1] = %+v", blocks[1])
+	}
+}
+
+// TestBuildRequestBodyMapsOptions は、GenerateOptions のうち interactions に写せるものが
+// 本文に載ることを検証します。nil の安全設定は落とします。
+//
+// 安全設定は genai-kit の NewSafetySettings で組み立てます。genai SDK を直接 import しない
+// 方針をテストでも守るためです。
+func TestBuildRequestBodyMapsOptions(t *testing.T) {
+	t.Parallel()
+
+	settings := gemini.NewSafetySettings(gemini.SafetyBlockOnlyHigh)
+	body, err := buildRequestBody("lyria-3.5", "p", nil, gemini.GenerateOptions{
+		SystemPrompt:    "be brief",
+		MaxOutputTokens: 32,
+		StopSequences:   []string{"END"},
+		SafetySettings:  append(settings, nil),
+	})
+	if err != nil {
+		t.Fatalf("buildRequestBody() error = %v", err)
+	}
+
+	if body.SystemInstruction != "be brief" {
+		t.Errorf("SystemInstruction = %q", body.SystemInstruction)
+	}
+	if body.GenerationConfig == nil || body.GenerationConfig.MaxOutputTokens != 32 || len(body.GenerationConfig.StopSequences) != 1 {
+		t.Errorf("GenerationConfig = %+v", body.GenerationConfig)
+	}
+	if len(body.SafetySettings) != len(settings) {
+		t.Fatalf("SafetySettings = %d 件, want %d 件（nil は落ちる）", len(body.SafetySettings), len(settings))
+	}
+	for i, got := range body.SafetySettings {
+		if got.Category != string(settings[i].Category) || got.Threshold != string(settings[i].Threshold) {
+			t.Errorf("SafetySettings[%d] = %+v, want %+v", i, got, settings[i])
+		}
 	}
 }

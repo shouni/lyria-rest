@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/shouni/genai-kit/gemini"
 )
@@ -17,7 +18,6 @@ type responseBody struct {
 	Steps  []step    `json:"steps"`
 	Usage  *usage    `json:"usage"`
 	Error  *apiError `json:"error"`
-	Model  string    `json:"model"`
 }
 
 // step は 1 段の入出力です。生成結果は type が "model_output" のものに載ります。
@@ -35,11 +35,38 @@ type usage struct {
 	TotalThoughtTokens int32 `json:"total_thought_tokens"`
 }
 
-// apiError は interactions のエラー本文です。
-// code は generateContent と違って文字列です（"invalid_request" など）。
+// apiError はエラー本文の error オブジェクトです。
+//
+// interactions は code を文字列で返します（"invalid_request" など）。一方、認証失敗や
+// 404 のようにゲートウェイで弾かれた場合は generateContent と同じ形で数値の code が
+// 返ります。どちらも同じ構造体で読めるように、code は両方を受け付ける型にしています。
 type apiError struct {
-	Message string `json:"message"`
-	Code    string `json:"code"`
+	Message string       `json:"message"`
+	Code    apiErrorCode `json:"code"`
+}
+
+// apiErrorCode は、JSON の文字列と数値のどちらで来ても文字列として保持するコードです。
+type apiErrorCode string
+
+func (c *apiErrorCode) UnmarshalJSON(data []byte) error {
+	if len(data) == 0 || string(data) == "null" {
+		*c = ""
+		return nil
+	}
+	if data[0] == '"' {
+		var s string
+		if err := json.Unmarshal(data, &s); err != nil {
+			return err
+		}
+		*c = apiErrorCode(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err != nil {
+		return err
+	}
+	*c = apiErrorCode(n.String())
+	return nil
 }
 
 // parseResponse は、レスポンス本文を genai-kit の gemini.Response へ変換します。
@@ -103,17 +130,26 @@ func parseResponse(data []byte) (*gemini.Response, error) {
 	}, nil
 }
 
-// parseAPIError は、2xx 以外の本文からエラーメッセージを取り出します。
-// 解釈できなければ本文の先頭をそのまま返します。
-func parseAPIError(data []byte, limit int) string {
+// parseAPIError は、2xx 以外の本文からエラーコードとメッセージを取り出します。
+// 解釈できなければコードは空、メッセージは本文の先頭 limit バイト（文字の途中では
+// 切らない）になります。
+func parseAPIError(data []byte, limit int) (code, message string) {
 	var body responseBody
 	if err := json.Unmarshal(data, &body); err == nil && body.Error != nil && body.Error.Message != "" {
-		return body.Error.Message
+		return string(body.Error.Code), body.Error.Message
 	}
-	if len(data) > limit {
-		data = data[:limit]
+	return "", truncateUTF8(string(data), limit)
+}
+
+// truncateUTF8 は s を limit バイト以内に切り詰めます。マルチバイト文字の途中では切りません。
+func truncateUTF8(s string, limit int) string {
+	if len(s) <= limit {
+		return s
 	}
-	return string(data)
+	for limit > 0 && !utf8.RuneStart(s[limit]) {
+		limit--
+	}
+	return s[:limit]
 }
 
 func tokenUsage(u *usage) *gemini.TokenUsage {

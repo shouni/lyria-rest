@@ -146,12 +146,15 @@ func TestGenerateReportsRejectedWAV(t *testing.T) {
 	if !errors.Is(err, ErrHTTP) {
 		t.Fatalf("error = %v, want %v", err, ErrHTTP)
 	}
-	var httpErr *HTTPError
-	if !errors.As(err, &httpErr) {
+	httpErr, ok := errors.AsType[*HTTPError](err)
+	if !ok {
 		t.Fatalf("error = %T, want *HTTPError", err)
 	}
 	if httpErr.StatusCode != http.StatusBadRequest {
 		t.Errorf("StatusCode = %d", httpErr.StatusCode)
+	}
+	if httpErr.Code != "invalid_request" {
+		t.Errorf("Code = %q, want invalid_request", httpErr.Code)
 	}
 	if httpErr.Message != "Audio MIME type AUDIO_WAV is not supported for models/lyria-3.5" {
 		t.Errorf("Message = %q, want API のメッセージそのもの", httpErr.Message)
@@ -171,9 +174,46 @@ func TestGenerateRejectsIncompleteInteraction(t *testing.T) {
 	if !errors.Is(err, gemini.ErrEmptyResponse) {
 		t.Fatalf("error = %v, want %v", err, gemini.ErrEmptyResponse)
 	}
-	var respErr *ResponseError
-	if !errors.As(err, &respErr) || respErr.Status != "failed" {
+	if !errors.Is(err, ErrIncomplete) {
+		t.Errorf("error = %v, want %v", err, ErrIncomplete)
+	}
+	respErr, ok := errors.AsType[*ResponseError](err)
+	if !ok || respErr.Status != "failed" {
 		t.Errorf("error = %v, want ResponseError{Status: failed}", err)
+	}
+}
+
+// TestGenerateRejectsOversizedResponse は、本文が上限を超えたときに読み込みを打ち切り、
+// ErrResponseTooLarge を返すことを検証します。
+func TestGenerateRejectsOversizedResponse(t *testing.T) {
+	t.Parallel()
+
+	server, _ := newRecordingServer(t, http.StatusOK, interactionResponse(t, "audio/wav", []byte("RIFF....WAVEfmt "), "text"))
+	c := newTestClient(t, server)
+	c.maxResponseBytes = 16
+
+	_, err := c.Generate(context.Background(), "lyria-3.5", "p", nil, gemini.GenerateOptions{})
+
+	if !errors.Is(err, ErrResponseTooLarge) {
+		t.Errorf("error = %v, want %v", err, ErrResponseTooLarge)
+	}
+}
+
+// TestNewDefaultsHTTPClient は、HTTPClient を省略しても呼び出せることを検証します。
+func TestNewDefaultsHTTPClient(t *testing.T) {
+	t.Parallel()
+
+	server, rec := newRecordingServer(t, http.StatusOK, interactionResponse(t, "audio/wav", []byte("RIFF"), ""))
+	c, err := New(Config{APIKey: "secret", Endpoint: server.URL})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+
+	if _, err := c.Generate(context.Background(), "lyria-3.5", "p", nil, gemini.GenerateOptions{}); err != nil {
+		t.Fatalf("Generate() error = %v", err)
+	}
+	if rec.path != "/v1beta/interactions" {
+		t.Errorf("path = %q", rec.path)
 	}
 }
 

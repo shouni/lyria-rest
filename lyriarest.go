@@ -43,6 +43,8 @@ var _ gemini.Generator = (*Client)(nil)
 type Client struct {
 	cfg  Config
 	http *http.Client
+	// maxResponseBytes はレスポンス本文の上限です。テストで小さくする以外は定数のままです。
+	maxResponseBytes int64
 }
 
 // New は提供された設定に基づいてクライアントを作成します。
@@ -55,7 +57,7 @@ func New(cfg Config) (*Client, error) {
 	if httpClient == nil {
 		httpClient = &http.Client{}
 	}
-	return &Client{cfg: cfg, http: httpClient}, nil
+	return &Client{cfg: cfg, http: httpClient, maxResponseBytes: maxResponseBytes}, nil
 }
 
 // Generate は、プロンプトと添付から生成を実行します。genai-kit の gemini.Generator と同じ契約です。
@@ -77,6 +79,18 @@ func (c *Client) Generate(ctx context.Context, model string, prompt string, atta
 		return nil, fmt.Errorf("lyriarest: リクエストの組み立てに失敗しました: %w", err)
 	}
 
+	data, err := c.post(ctx, payload)
+	if err != nil {
+		return nil, err
+	}
+	return parseResponse(data)
+}
+
+// post は interactions エンドポイントへ本文を送り、2xx のレスポンス本文を返します。
+//
+// 2xx 以外は HTTPError、上限超過は ErrResponseTooLarge になります。API の形の解釈は
+// 呼び出し側（buildRequestBody / parseResponse）に置き、ここは HTTP のやり取りだけを持ちます。
+func (c *Client) post(ctx context.Context, payload []byte) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, c.cfg.interactionsURL(), bytes.NewReader(payload))
 	if err != nil {
 		return nil, fmt.Errorf("lyriarest: リクエストの作成に失敗しました: %w", err)
@@ -90,17 +104,26 @@ func (c *Client) Generate(ctx context.Context, model string, prompt string, atta
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	data, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
+	data, err := readLimited(resp.Body, c.maxResponseBytes)
 	if err != nil {
-		return nil, fmt.Errorf("lyriarest: レスポンスの読み込みに失敗しました: %w", err)
-	}
-	if len(data) > maxResponseBytes {
-		return nil, ErrResponseTooLarge
+		return nil, err
 	}
 
 	if resp.StatusCode/100 != 2 {
-		return nil, &HTTPError{StatusCode: resp.StatusCode, Message: parseAPIError(data, maxErrorBodyBytes)}
+		code, message := parseAPIError(data, maxErrorBodyBytes)
+		return nil, &HTTPError{StatusCode: resp.StatusCode, Code: code, Message: message}
 	}
+	return data, nil
+}
 
-	return parseResponse(data)
+// readLimited は r を最大 limit バイトまで読み、それを超えていれば ErrResponseTooLarge を返します。
+func readLimited(r io.Reader, limit int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(r, limit+1))
+	if err != nil {
+		return nil, fmt.Errorf("lyriarest: レスポンスの読み込みに失敗しました: %w", err)
+	}
+	if int64(len(data)) > limit {
+		return nil, ErrResponseTooLarge
+	}
+	return data, nil
 }

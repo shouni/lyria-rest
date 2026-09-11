@@ -115,11 +115,14 @@ func buildInput(prompt string, attachments []gemini.Attachment) (any, error) {
 		if len(attachment.Data) > 0 && attachment.URI != "" {
 			return nil, fmt.Errorf("%w: attachments[%d] は Data と URI のどちらか一方だけを設定してください", ErrInvalidAttachment, i)
 		}
-		if !strings.HasPrefix(attachment.MIMEType, "image/") {
+		// MIME type は Data を送るときだけ必須です。URI 参照ではサーバー側の判定に委ねられる
+		// ため（genai-kit の Attachment と同じ規則、API 側でも mime_type は任意）、空を通します。
+		if attachment.MIMEType == "" {
+			if len(attachment.Data) > 0 {
+				return nil, fmt.Errorf("%w: attachments[%d] に MIME type が設定されていません", ErrInvalidAttachment, i)
+			}
+		} else if !strings.HasPrefix(attachment.MIMEType, "image/") {
 			return nil, fmt.Errorf("%w: attachments[%d] の MIME type は %q", ErrUnsupportedAttachment, i, attachment.MIMEType)
-		}
-		if len(attachment.Data) > 0 && attachment.MIMEType == "" {
-			return nil, fmt.Errorf("%w: attachments[%d] にMIME typeが設定されていません", ErrInvalidAttachment, i)
 		}
 		blocks = append(blocks, contentBlock{
 			Type:     "image",

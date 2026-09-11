@@ -195,7 +195,8 @@ in_progress, requires_action, completed, failed, cancelled, incomplete, budget_e
 `budget_exceeded` も、再試行して直らない点で他の失敗とは扱いが違います。
 
 このリポジトリの実装は `background` を送らない（同期実行のみ）ため、**`completed` 以外を
-まとめて空レスポンス扱い**にしています。上の区別は実装していません。凍結中で実機の確認が
+まとめて空レスポンス扱い**にしています（`gemini.ErrEmptyResponse` と `ErrIncomplete` の
+両方で判定でき、`ResponseError.Status` に状態が入ります）。上の区別は実装していません。凍結中で実機の確認が
 できず、確かめずに分岐だけ増やしても正しさを保証できないためです。非同期実行を使う日には
 ここを分けてください。
 

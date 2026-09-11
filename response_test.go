@@ -66,17 +66,61 @@ func TestParseResponseRejectsEmpty(t *testing.T) {
 	}
 }
 
-// TestParseAPIError は、エラー本文からメッセージを取り出せることと、
+// TestParseAPIError は、エラー本文からコードとメッセージを取り出せることと、
 // 解釈できない本文では先頭を返すことを検証します。
+//
+// code は interactions では文字列、ゲートウェイ由来（認証失敗など）では数値で返ります。
+// 数値の code で Unmarshal ごと失敗して本文が生のまま返るのが以前の挙動でした。
 func TestParseAPIError(t *testing.T) {
 	t.Parallel()
 
-	got := parseAPIError([]byte(`{"error":{"message":"quota exceeded","code":"resource_exhausted"}}`), 100)
-	if got != "quota exceeded" {
-		t.Errorf("parseAPIError() = %q", got)
+	tests := []struct {
+		name        string
+		body        string
+		limit       int
+		wantCode    string
+		wantMessage string
+	}{
+		{"interactions の文字列 code", `{"error":{"message":"quota exceeded","code":"resource_exhausted"}}`, 100, "resource_exhausted", "quota exceeded"},
+		{"ゲートウェイの数値 code", `{"error":{"code":401,"message":"API key not valid.","status":"UNAUTHENTICATED"}}`, 100, "401", "API key not valid."},
+		{"code 無し", `{"error":{"message":"oops"}}`, 100, "", "oops"},
+		{"解釈できない本文は先頭を返す", "<html>502</html>", 8, "", "<html>50"},
+		{"マルチバイト文字の途中では切らない", "エラーです", 4, "", "エ"},
 	}
 
-	if got := parseAPIError([]byte("<html>502</html>"), 8); got != "<html>50" {
-		t.Errorf("parseAPIError() = %q, want 先頭 8 バイト", got)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			code, message := parseAPIError([]byte(tt.body), tt.limit)
+			if code != tt.wantCode || message != tt.wantMessage {
+				t.Errorf("parseAPIError() = (%q, %q), want (%q, %q)", code, message, tt.wantCode, tt.wantMessage)
+			}
+		})
+	}
+}
+
+// TestParseResponseIncompleteStatus は、completed 以外の状態が gemini.ErrEmptyResponse と
+// ErrIncomplete の両方で判定できることを検証します。
+func TestParseResponseIncompleteStatus(t *testing.T) {
+	t.Parallel()
+
+	_, err := parseResponse([]byte(`{"status":"failed","steps":[]}`))
+
+	if !errors.Is(err, gemini.ErrEmptyResponse) {
+		t.Errorf("errors.Is(err, gemini.ErrEmptyResponse) = false, err = %v", err)
+	}
+	if !errors.Is(err, ErrIncomplete) {
+		t.Errorf("errors.Is(err, ErrIncomplete) = false, err = %v", err)
+	}
+	respErr, ok := errors.AsType[*ResponseError](err)
+	if !ok || respErr.Status != "failed" {
+		t.Errorf("error = %v, want ResponseError{Status: failed}", err)
+	}
+
+	// 空レスポンスは「完了したが中身が無い」なので ErrIncomplete にはならない。
+	_, err = parseResponse([]byte(`{"status":"completed","steps":[]}`))
+	if errors.Is(err, ErrIncomplete) {
+		t.Errorf("空レスポンスが ErrIncomplete と判定された: %v", err)
 	}
 }

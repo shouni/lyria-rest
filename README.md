@@ -88,8 +88,10 @@ curl -s -X POST "https://generativelanguage.googleapis.com/v1beta/interactions" 
   Lyria もそちらにしか無いためです。`v1` は `lyria-3.5` を知らず、`v1alpha` は廃止済みなので、
   `v1beta` が唯一の経路です。
 * **失敗の分類は genai-kit のセンチネルで判定できます**: 空のレスポンスは
-  `gemini.ErrEmptyResponse` で `errors.Is` が通ります。API が 2xx 以外を返した場合は
-  `HTTPError`（`StatusCode` と API のメッセージ付き、`errors.Is(err, ErrHTTP)`）です。
+  `gemini.ErrEmptyResponse` で `errors.Is` が通ります。interaction が `completed` 以外で
+  返った場合も同じセンチネルに加えて `ErrIncomplete` でも判定できます。API が 2xx 以外を
+  返した場合は `HTTPError`（`StatusCode`・API のエラーコード `Code`・メッセージ付き、
+  `errors.Is(err, ErrHTTP)`）です。
 * **リトライを持ちません**: SDK 内蔵のリトライは通りません。再試行の判断は呼び出し側で
   行ってください。発射間隔・上限時間・重複排除が要る場合は、genai-kit の `callguard` で包み、
   テキスト生成と 1 つのガードを共有する形でワークフロー層に置いてください。

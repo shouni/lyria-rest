@@ -1,9 +1,11 @@
 // Package lyriarest は、Gemini API の Lyria を interactions エンドポイントで直接呼び、
 // WAV を要求します。
 //
-// genai SDK には音声の出力フォーマットを指定する口が無く、既定の MP3 しか受け取れません。
-// REST の interactions には response_format.mime_type があるため、その 1 点のために SDK を
-// 迂回するのがこのパッケージです。
+// genai SDK の generateContent には音声の出力フォーマットを指定する口が無く、既定の MP3 しか
+// 受け取れません。REST の interactions には response_format.mime_type があるため、その 1 点の
+// ために SDK を迂回するのがこのパッケージです。genai v1.72.0 で SDK にも interactions の
+// クライアントが入り、AudioResponseFormat.MimeType で WAV を指定できるようになりましたが、
+// 現在の障害はモデル側の未対応なので、この迂回の扱いは変わっていません。
 //
 // 2026-09-07 時点で、Lyria のどのモデルもこの指定を受け付けません。API のバリデーションは
 // audio/wav を通し、その先のモデルが弾きます。したがって現在このパッケージは常に

@@ -31,7 +31,9 @@ godoc を読んでも気付けないことだけです。
 
 `interactions` の `response_format` には出力形式の口があり、API のバリデーションは
 `audio/wav` を正しい値として受け付けます（公式 Python SDK `google-genai` の
-`AudioResponseFormat.mime_type` に列挙されています）。ところが、その先のモデルが弾きます。
+`AudioResponseFormat.mime_type` に列挙されています）。Go の `google.golang.org/genai` も
+v1.72.0 で interactions クライアントを持ち、`AudioResponseFormatMimeTypeAudioWav` で同じ値を
+指定できます。SDK に口が無いという迂回の理由は崩れましたが、モデルが弾く以上、結果は変わりません。ところが、その先のモデルが弾きます。
 
 ```
 lyria-3.5             → Audio MIME type AUDIO_WAV is not supported for models/lyria-3.5

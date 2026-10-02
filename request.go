@@ -10,8 +10,9 @@ import (
 
 // wavMIMEType は、音声を WAV で要求する値です。
 //
-// このライブラリの存在理由はこの 1 か所です。genai SDK には出力フォーマットを指定する口が
-// 無いため、REST を直接叩いています。値は API が受け付ける列挙のひとつで、他に
+// このライブラリの存在理由はこの 1 か所です。genai SDK の generateContent には出力フォーマットを
+// 指定する口が無いため、REST を直接叩いています（v1.72.0 以降は SDK の interactions にも口が
+// あります）。値は API が受け付ける列挙のひとつで、他に
 // audio/mp3・audio/ogg_opus・audio/l16・audio/alaw・audio/mulaw があります。
 //
 // ただし 2026-09-07 時点で、Lyria のどのモデルもこの指定を受け付けません（README の

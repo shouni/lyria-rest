@@ -1,6 +1,6 @@
 # 🎧 Lyria REST
 
-[![Status](https://img.shields.io/badge/Status-Blocked%20upstream-lightgrey)](#-凍結の理由-blocked-upstream)
+[![Status](https://img.shields.io/badge/Status-Archived-lightgrey)](#-アーカイブしました-archived)
 [![Language](https://img.shields.io/badge/Language-Go-blue)](https://go.dev/)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/lyria-rest)](https://go.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
@@ -12,18 +12,36 @@
 **直接呼び、音声を WAV で要求する**ための Go ライブラリです。返すのは音声バイト列と、モデルが
 返すテキストだけで、**保存先は決めません**。歌詞や楽曲レシピを作る工程も持ちません。
 
-> [!WARNING]
-> **現在このライブラリは動きません。** Lyria が WAV の要求を受け付けないためで、こちらの
-> 実装の問題ではありません。呼び出すと必ず HTTP 400 になります。
-> 経緯と、再開できるようになったかの判定方法は[凍結の理由](#-凍結の理由-blocked-upstream)にあります。
->
-> 音楽生成の既定の入口は [genai-kit](https://github.com/shouni/genai-kit) の `lyria` です。
+> [!IMPORTANT]
+> **このリポジトリはアーカイブしました。** Lyria の WAV は、[genai-kit](https://github.com/shouni/genai-kit)
+> v1.6.0 の `gemini.Client.Interactions` で、SDK のまま受け取れます。理由は
+> [アーカイブしました](#-アーカイブしました-archived)にあります。
 
 シグネチャ・フィールド・エラーの一覧は
 [pkg.go.dev](https://pkg.go.dev/github.com/shouni/lyria-rest) にあります。ここに書くのは、
 godoc を読んでも気付けないことだけです。
 
 ---
+
+## 📦 アーカイブしました (Archived)
+
+**2026-10-18 に、Lyria が WAV を返すようになりました。** 下の「凍結の理由」にある判定コマンドで、
+`lyria-3.5` が `audio/wav`（48 kHz・16 bit・ステレオ）を返すことを確かめています。
+
+それでもこのライブラリを再開せず、アーカイブしたのは、REST を手で叩く理由がもう無いからです。
+genai SDK（`google.golang.org/genai` v1.72.0 以降）は Interactions のクライアントを持ち、
+`AudioResponseFormat` で出力形式を指定できます。genai-kit v1.6.0 がそれを `gemini.Generator` として包んだので、
+差し替え点（`lyria.WithAudioGenerator`）はそのままで、手書きの REST も独自のエラー型も要りません。
+
+```go
+lyria.WithAudioGenerator(client.Interactions(gemini.InteractionsConfig{AudioMIMEType: "audio/wav"}))
+```
+
+移す途中で、実機で 1 つ見つかったことがあります。Interactions の `safety_settings` は、SDK の列挙に
+ある `block_none` を**どのカテゴリでも拒否**します（`The value 'block_none' is not supported`）。
+ブロックしない意図に当たるのは `off` で、genai-kit はそう写します。
+
+以下は凍結していた間の記録です。同じ調査を繰り返さないために残します。
 
 ## 🧊 凍結の理由 (Blocked upstream)
 
